@@ -41,7 +41,7 @@ Phân tích hình ảnh này và trích xuất các thông tin sau đây.
 Trả lời bằng một đối tượng JSON hợp lệ duy nhất.
 Các key của JSON phải là: "ma_niem_phong", "ma_tau", "ngay_chup", "ma_thiet_bi".
 
-- "ma_niem_phong": Tìm mã niêm phong, ví dụ "SEAL A 12345", "K 67890", hoặc "Z01234". Chỉ lấy phần gồm 1 ký tự chữ và 5 số, ví dụ "A12345", "K67890", hoặc "Z01234". Nếu không đúng định dạng, trả về "Không tìm thấy".
+- "ma_niem_phong": Tìm mã niêm phong, ví dụ "SEAL A 123456", "K 678901", hoặc "Z012345". Chỉ lấy phần gồm 1 ký tự chữ và 6 số, ví dụ "A123456", "K678901", hoặc "Z012345". Nếu không đúng định dạng, trả về "Không tìm thấy".
 - "ma_tau": Tìm mã tàu, ví dụ "BT 97793 TS". Chỉ lấy phần "BT" và 5 số tiếp theo, ví dụ "BT97793". Nếu không đúng định dạng, trả về "Không tìm thấy".
 - "ngay_chup": Tìm ngày tháng trên ảnh, ví dụ "05/08/2025". Chuyển thành định dạng 6 số "DDMMYY", ví dụ "050825". Nếu không đúng định dạng, trả về "Không tìm thấy".
 - "ma_thiet_bi": Tìm mã thiết bị, thường bắt đầu bằng BTK, ví dụ "BTK123456". Chỉ lấy 6 số cuối, ví dụ "123456". Nếu không đúng định dạng, trả về "Không tìm thấy".

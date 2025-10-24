@@ -5,29 +5,91 @@ from ttkwidgets.autocomplete import AutocompleteCombobox, AutocompleteEntry  # I
 from tkinter import scrolledtext, filedialog, messagebox
 import os
 import shutil
-from PIL import Image, ImageTk
-import webbrowser
 import google.generativeai as genai
 import json
 import threading
 from collections import Counter
+from PIL import Image
+import subprocess
+import sys
 
 
-selected_image_folder = ""
-image_paths = []
-image_labels = []
-remove_buttons = []
 CONFIG_FILE = "folder_path_config.txt"
+INPUT_FOLDER_CONFIG = "input_folder_config.txt"
+OUTPUT_FOLDER_CONFIG = "output_folder_config.txt"
 
 # Cấu hình Google Gemini AI
-GOOGLE_API_KEY = "AIzaSyAylYXbqPkbqBTGc7Spct9-EFQA0lguKaI"
-try:
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash-lite')
-    AI_AVAILABLE = True
-except Exception as e:
-    print(f"Lỗi khởi tạo AI: {e}")
+def load_api_config():
+    """Load cấu hình API từ file JSON hoặc báo lỗi"""
+    try:
+        with open("api_config.json", "r", encoding="utf-8") as f:
+            config = json.load(f)
+            api_key = config.get("api_key", "")
+            model = config.get("model", "gemini-2.5-flash-lite")
+            
+            if not api_key:
+                print("❌ Lỗi: Chưa cấu hình API Key!")
+                print("💡 Hướng dẫn: Chạy config_manager.py để cấu hình API Key")
+                return None, None
+            
+            return api_key, model
+    except FileNotFoundError:
+        print("❌ Lỗi: Không tìm thấy file api_config.json!")
+        print("💡 Hướng dẫn: Chạy config_manager.py để tạo file cấu hình API")
+        return None, None
+
+GOOGLE_API_KEY, MODEL_NAME = load_api_config()
+if GOOGLE_API_KEY and MODEL_NAME:
+    try:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        model = genai.GenerativeModel(MODEL_NAME)
+        AI_AVAILABLE = True
+        print("✅ AI đã sẵn sàng!")
+    except Exception as e:
+        print(f"❌ Lỗi khởi tạo AI: {e}")
+        AI_AVAILABLE = False
+else:
     AI_AVAILABLE = False
+    print("❌ AI không khả dụng - Cần cấu hình API Key")
+
+
+
+
+def save_input_folder_path(path):
+    with open(INPUT_FOLDER_CONFIG, "w") as f:
+        f.write(path)
+
+def save_output_folder_path(path):
+    with open(OUTPUT_FOLDER_CONFIG, "w") as f:
+        f.write(path)
+
+def load_input_folder_path():
+    try:
+        with open(INPUT_FOLDER_CONFIG, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+
+def load_output_folder_path():
+    try:
+        with open(OUTPUT_FOLDER_CONFIG, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+
+def browse_input_folder():
+    folder_path = filedialog.askdirectory(title="Chọn folder input")
+    if folder_path:
+        input_folder_entry.delete(0, tk.END)
+        input_folder_entry.insert(0, folder_path)
+        save_input_folder_path(folder_path)
+
+def browse_output_folder():
+    folder_path = filedialog.askdirectory(title="Chọn folder output")
+    if folder_path:
+        output_folder_entry.delete(0, tk.END)
+        output_folder_entry.insert(0, folder_path)
+        save_output_folder_path(folder_path)
 
 # Tạo mapping từ mã tỉnh sang tên tỉnh
 def create_tinh_mapping():
@@ -42,22 +104,6 @@ def create_tinh_mapping():
     except FileNotFoundError:
         print("Không tìm thấy file ma_tinh_config.txt")
     return mapping
-
-def extract_tinh_from_tau_code(tau_code):
-    """Trích xuất mã tỉnh từ mã tàu và tìm tên tỉnh tương ứng"""
-    if not tau_code:
-        return "Không tìm thấy"
-    
-    tinh_mapping = create_tinh_mapping()
-    
-    # Thử các độ dài khác nhau của mã tỉnh (2-3 ký tự)
-    for length in [3, 2]:
-        if len(tau_code) >= length:
-            code = tau_code[:length]
-            if code in tinh_mapping:
-                return tinh_mapping[code]
-    
-    return "Không tìm thấy"
 
 # Tạo prompt với thông tin mapping tỉnh
 def create_master_prompt():
@@ -74,30 +120,25 @@ def create_master_prompt():
     return f"""
 Phân tích hình ảnh này và trích xuất các thông tin sau đây.
 Trả lời bằng một đối tượng JSON hợp lệ duy nhất.
-Các key của JSON phải là: "ma_niem_phong", "ma_tau", "ngay_chup", "ma_thiet_bi", "tinh".
+Các key của JSON phải là: "ma_niem_phong", "ma_tau", "ngay_chup", "ma_thiet_bi".
 
-- "ma_niem_phong": Tìm mã niêm phong, ví dụ "SEAL A 12345", "K 67890", hoặc "Z01234". Chỉ lấy phần gồm 1 ký tự chữ và 5 số, ví dụ "A12345", "K67890", hoặc "Z01234". Nếu không đúng định dạng, trả về "Không tìm thấy".
-- "ma_tau": Tìm số tàu, chỉ lấy phần số (không có chữ cái). Ví dụ từ "KG 95596" chỉ lấy "95596", từ "BT 97793" chỉ lấy "97793", từ "SG 12345" chỉ lấy "12345". Nếu không tìm thấy số, trả về "Không tìm thấy".
+- "ma_niem_phong": Tìm mã niêm phong, ví dụ "SEAL A 123456", "K 678901", hoặc "Z012345". Chỉ lấy phần gồm 1 ký tự chữ và 6 số, ví dụ "A123456", "K678901", hoặc "Z012345". Nếu không đúng định dạng, trả về "Không tìm thấy".
+- "ma_tau": Tìm mã tàu đầy đủ (có cả chữ cái và số), ví dụ "KG 95596", "BT 97793", "SG 12345", "BĐ 12345", "ĐNa 67890", "TTH 11111". Giữ nguyên format đầy đủ với khoảng trắng. Nếu không tìm thấy, trả về "Không tìm thấy".
 - "ngay_chup": Tìm ngày tháng trên ảnh, ví dụ "05/08/2025". Chuyển thành định dạng 6 số "DDMMYY", ví dụ "050825". Nếu không đúng định dạng, trả về "Không tìm thấy".
-- "ma_thiet_bi": Tìm mã thiết bị, thường bắt đầu bằng BTK, ví dụ "BTK123456". Chỉ lấy 6 số cuối, ví dụ "123456". Nếu không đúng định dạng, trả về "Không tìm thấy".
-- "tinh": Tìm mã tàu đầy đủ (có cả chữ cái và số), sau đó dựa vào 2-3 ký tự đầu để xác định tên tỉnh thành. CHÚ Ý: Một số mã tỉnh có 3 ký tự như BĐ, BTh, ĐNa, ĐL, ĐNo, ĐB, ĐN, ĐT, HNa, HGi, LCa, QNa, QNg, TNg, TTH.
-
-DANH SÁCH MÃ TỈNH:
-{mapping_text}
+- "ma_thiet_bi": Tìm mã thiết bị, thường bắt đầu bằng BTK, ví dụ "BTK123456". Chỉ lấy 6 số cuối, ví dụ "123456". QUAN TRỌNG: Mã thiết bị phải là đúng 6 chữ số. Nếu không đúng định dạng hoặc không đủ 6 số, trả về "Không tìm thấy".
 
 Ví dụ: 
-- Từ "KG 95596" → lấy "KG" → tìm "Kiên Giang"
-- Từ "BĐ 12345" → lấy "BĐ" → tìm "Bình Định"  
-- Từ "ĐNa 67890" → lấy "ĐNa" → tìm "Đà Nẵng"
-- Từ "TTH 11111" → lấy "TTH" → tìm "Thừa Thiên Huế"
+- Mã thiết bị: "BTK123456" → lấy "123456" (6 số)
+- Mã thiết bị: "BTK12345" → "Không tìm thấy" (chỉ có 5 số)
+- Mã thiết bị: "BTK1234567" → lấy "123456" (6 số đầu)
+- Mã tàu: "KG 95596" → trả về "KG 95596"
+- Mã tàu: "BĐ 12345" → trả về "BĐ 12345"
+- Mã tàu: "ĐNa 67890" → trả về "ĐNa 67890"
 
 Nếu không xác định được, trả về "Không tìm thấy".
 
 Quan trọng: Chỉ trả về đối tượng JSON, không thêm bất kỳ văn bản giải thích nào khác.
 """
-
-MASTER_PROMPT = create_master_prompt()
-
 
 def process_image_with_ai(image_path):
     """Phân tích một ảnh bằng AI và trả về thông tin"""
@@ -108,6 +149,8 @@ def process_image_with_ai(image_path):
         response = model.generate_content([current_prompt, img])
         cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
         data = json.loads(cleaned_text)
+        # Lưu raw response để debug
+        data['raw_response'] = response.text
         return data
     except json.JSONDecodeError:
         return {"error": "AI không trả về JSON hợp lệ", "raw_response": response.text}
@@ -115,13 +158,27 @@ def process_image_with_ai(image_path):
         return {"error": f"Lỗi: {e}"}
 
 def analyze_images_with_ai():
-    """Phân tích tất cả ảnh trong folder đã chọn bằng AI"""
+    """Phân tích tất cả ảnh trong folder input bằng AI"""
     if not AI_AVAILABLE:
-        messagebox.showerror("Lỗi", "AI không khả dụng. Vui lòng kiểm tra API key.")
+        messagebox.showerror("Lỗi", "❌ AI không khả dụng!\n\n💡 Cần cấu hình API Key:\n1. Chạy config_manager.py\n2. Vào tab 'API Gemini'\n3. Nhập API Key và nhấn 'Lưu'")
         return
     
-    if not selected_image_folder or not image_paths:
-        messagebox.showwarning("Cảnh báo", "Vui lòng chọn folder chứa ảnh để phân tích.")
+    input_path = input_folder_entry.get().strip()
+    if not input_path or not os.path.isdir(input_path):
+        messagebox.showwarning("Cảnh báo", "Vui lòng chọn folder input chứa ảnh để phân tích.")
+        return
+    
+    # Tìm tất cả ảnh trong folder input
+    image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
+    image_paths = []
+    
+    for root, _, files in os.walk(input_path):
+        for file in files:
+            if file.lower().endswith(image_extensions):
+                image_paths.append(os.path.join(root, file))
+    
+    if not image_paths:
+        messagebox.showwarning("Cảnh báo", "Không tìm thấy ảnh nào trong folder input.")
         return
     
     # Hiển thị loading
@@ -131,7 +188,7 @@ def analyze_images_with_ai():
     
     # Thông báo bắt đầu phân tích
     print(f"\n🚀 BẮT ĐẦU PHÂN TÍCH {len(image_paths)} ẢNH BẰNG AI...")
-    print(f"📁 Folder: {selected_image_folder}")
+    print(f"📁 Folder: {input_path}")
     print("-" * 60)
     
     def analyze_thread():
@@ -161,15 +218,45 @@ def analyze_images_with_ai():
                     continue
                 
                 ma_niem_phong = result.get('ma_niem_phong', '').strip()
-                ma_tau = result.get('ma_tau', '').strip()
+                ma_tau_full = result.get('ma_tau', '').strip()  # Mã tàu đầy đủ
                 ngay_chup = result.get('ngay_chup', '').strip()
                 ma_thiet_bi = result.get('ma_thiet_bi', '').strip()
-                tinh = result.get('tinh', '').strip()
+                
+                # Tự động suy ra tỉnh từ mã tàu đầy đủ
+                tinh = "Không tìm thấy"
+                ma_tau_so = "Không tìm thấy"
+                
+                if ma_tau_full and ma_tau_full.lower() != 'không tìm thấy':
+                    # Tách mã tàu đầy đủ thành chữ cái và số
+                    import re
+                    ma_tau_pattern = r'([A-Z]{2,3})[-\s]*(\d{5})'
+                    ma_tau_match = re.search(ma_tau_pattern, ma_tau_full)
+                    
+                    if ma_tau_match:
+                        tinh_code = ma_tau_match.group(1)  # Chữ cái tỉnh
+                        ma_tau_so = ma_tau_match.group(2)  # Số tàu
+                        
+                        # Tìm tỉnh từ mapping
+                        tinh_mapping = create_tinh_mapping()
+                        for code, name in tinh_mapping.items():
+                            if code == tinh_code:
+                                tinh = name
+                                break
+                        
+                        # Lưu thông tin vào result để debug
+                        result['tinh_code'] = tinh_code
+                        result['ma_tau_so'] = ma_tau_so
+                        result['tinh'] = tinh
+                    else:
+                        # Nếu không match pattern, giữ nguyên
+                        ma_tau_so = ma_tau_full
+                        result['ma_tau_so'] = ma_tau_so
+                        result['tinh'] = tinh
                 
                 if ma_niem_phong and ma_niem_phong.lower() != 'không tìm thấy':
                     niem_phong_counts[ma_niem_phong] += 1
-                if ma_tau and ma_tau.lower() != 'không tìm thấy':
-                    tau_counts[ma_tau] += 1
+                if ma_tau_so and ma_tau_so.lower() != 'không tìm thấy':
+                    tau_counts[ma_tau_so] += 1
                 if ngay_chup and ngay_chup.lower() != 'không tìm thấy':
                     ngay_chup_counts[ngay_chup] += 1
                 if ma_thiet_bi and ma_thiet_bi.lower() != 'không tìm thấy':
@@ -282,10 +369,44 @@ def export_detailed_results_to_console(all_results):
                 print(f"📝 Response gốc: {result['raw_response'][:100]}...")
         else:
             print(f"  🔒 Mã niêm phong: {result.get('ma_niem_phong', 'Không tìm thấy')}")
-            print(f"  🚢 Số tàu: {result.get('ma_tau', 'Không tìm thấy')}")
+            print(f"  🚢 Số tàu: {result.get('ma_tau_so', 'Không tìm thấy')}")
             print(f"  📅 Ngày chụp: {result.get('ngay_chup', 'Không tìm thấy')}")
             print(f"  🔧 Mã thiết bị: {result.get('ma_thiet_bi', 'Không tìm thấy')}")
-            print(f"  📍 Tỉnh: {result.get('tinh', 'Không tìm thấy')}")
+            
+            # Chi tiết về việc suy ra tỉnh
+            tinh = result.get('tinh', 'Không tìm thấy')
+            print(f"  📍 Tỉnh: {tinh}")
+            
+            # Hiển thị thông tin chi tiết về mã tàu và tỉnh
+            if 'raw_response' in result:
+                raw_response = result['raw_response']
+                print(f"     📝 Raw response từ AI:")
+                print(f"        {raw_response[:200]}...")
+                
+                # Lấy thông tin đã được xử lý
+                ma_tau_full = result.get('ma_tau', '')
+                tinh_code = result.get('tinh_code', '')
+                ma_tau_so = result.get('ma_tau_so', '')
+                
+                print(f"     🚢 Mã tàu đầy đủ từ AI: '{ma_tau_full}'")
+                
+                if tinh_code and ma_tau_so:
+                    print(f"     🔍 Phân tích mã tàu '{ma_tau_full}':")
+                    print(f"        📍 Chữ cái tỉnh: '{tinh_code}'")
+                    print(f"        🔢 Số tàu: '{ma_tau_so}'")
+                    print(f"        🗺️  Suy ra tỉnh: '{tinh}'")
+                    
+                    # Kiểm tra mapping
+                    if tinh != "Không tìm thấy":
+                        print(f"        ✅ Mapping thành công: {tinh_code} → {tinh}")
+                        print(f"        🎯 Chương trình đã dùng chữ cái '{tinh_code}' để suy ra tỉnh '{tinh}'")
+                    else:
+                        print(f"        ❌ Không tìm thấy mapping cho mã: {tinh_code}")
+                else:
+                    print(f"     ⚠️  Mã tàu '{ma_tau_full}' không đúng format (cần: XX 12345)")
+                    print(f"     🤔 Không thể suy ra tỉnh từ mã tàu này")
+            else:
+                print(f"     ⚠️  Không có raw_response để phân tích")
     
     print("\n" + "="*80)
 
@@ -305,6 +426,39 @@ def export_results_to_console(ma_niem_phong, ma_tau, ngay_chup, ma_thiet_bi, tin
     print(f"  📅 Ngày chụp: {ngay_chup if ngay_chup else 'Không tìm thấy'}")
     print(f"  🔧 Mã thiết bị: {ma_thiet_bi if ma_thiet_bi else 'Không tìm thấy'}")
     print(f"  📍 Tỉnh: {tinh if tinh else 'Không tìm thấy'}")
+    
+    # Thêm thông tin về mapping tỉnh
+    if tinh and tinh != "Không tìm thấy":
+        print("-"*60)
+        print("🗺️  THÔNG TIN MAPPING TỈNH:")
+        # Tìm mã tỉnh tương ứng
+        found_mapping = False
+        tinh_mapping = create_tinh_mapping()
+        for code, name in tinh_mapping.items():
+            if name == tinh:
+                print(f"  🏷️  Mã tỉnh: {code}")
+                print(f"  📍 Tên tỉnh: {name}")
+                print(f"  ✅ Mapping: {code} → {name}")
+                found_mapping = True
+                break
+        
+        if not found_mapping:
+            print(f"  ⚠️  Không tìm thấy mã tỉnh cho: {tinh}")
+            print(f"  🔍 Có thể AI đã nhận diện trực tiếp tên tỉnh từ ảnh")
+            print(f"  📋 Danh sách mã tỉnh có sẵn:")
+            for code, name in list(tinh_mapping.items())[:10]:  # Hiển thị 10 mã đầu
+                print(f"     {code} → {name}")
+            if len(tinh_mapping) > 10:
+                print(f"     ... và {len(tinh_mapping) - 10} mã khác")
+    else:
+        print("-"*60)
+        print("🗺️  THÔNG TIN MAPPING TỈNH:")
+        print(f"  ❌ AI không nhận diện được tỉnh từ ảnh")
+        print(f"  💡 Có thể do:")
+        print(f"     - Không có mã tàu rõ ràng trong ảnh")
+        print(f"     - Mã tàu không khớp với danh sách mapping")
+        print(f"     - Chất lượng ảnh không đủ để nhận diện")
+    
     print("="*60)
     print("💡 Thông tin đã được tự động điền vào form!")
     print("="*60 + "\n")
@@ -314,123 +468,22 @@ def show_ai_error(error_msg):
     label_result.config(text=f"❌ Lỗi AI: {error_msg}")
     button_analyze.config(state="normal")
 
-def show_image(index):
-    # Hàm này không còn cần thiết vì đã chuyển sang chọn folder
-    pass
-
-def remove_image_and_close(index, window_to_close):
-    # Hàm này không còn cần thiết vì đã chuyển sang chọn folder
-    window_to_close.destroy()
-
-def select_image_folder():
-    global selected_image_folder, image_paths, image_labels, remove_buttons
-    folder_path = filedialog.askdirectory(title="Chọn thư mục chứa ảnh")
-    if not folder_path:
-        return
-    
-    selected_image_folder = folder_path
-    
-    # Tìm tất cả ảnh trong folder
-    image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
-    image_paths = []
-    
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            if file.lower().endswith(image_extensions):
-                image_paths.append(os.path.join(root, file))
-    
-    # Cập nhật hiển thị
-    update_folder_display()
-    
-    # Hiển thị preview một số ảnh đầu tiên
-    show_image_previews()
-
-def update_folder_display():
-    """Cập nhật hiển thị thông tin folder đã chọn"""
-    if selected_image_folder:
-        folder_name = os.path.basename(selected_image_folder)
-        label_folder_info.config(text=f"📁 Folder: {folder_name} ({len(image_paths)} ảnh)")
-    else:
-        label_folder_info.config(text="📁 Chưa chọn folder")
-
-def show_image_previews():
-    """Hiển thị preview của một số ảnh đầu tiên"""
-    # Xóa các preview cũ
-    for widget in image_display_frame.winfo_children():
-        widget.destroy()
-    image_labels = []
-    remove_buttons = []
-    
-    # Hiển thị tối đa 6 ảnh preview
-    preview_count = min(6, len(image_paths))
-    for i in range(preview_count):
-        image_path = image_paths[i]
-        
-        # Tạo frame để chứa ảnh
-        image_container = tk.Frame(image_display_frame)
-        image_container.pack(side=tk.LEFT, padx=5, pady=5)
-
-        # Hiển thị ảnh (giảm kích thước ảnh)
-        try:
-            img = Image.open(image_path)
-            img.thumbnail((100, 100))
-            photo = ImageTk.PhotoImage(img)
-            label = tk.Label(image_container, image=photo)
-            label.image = photo
-            label.pack()
-
-            # Thêm sự kiện click vào ảnh để xem chi tiết
-            label.bind("<Button-1>", lambda event, path=image_path: webbrowser.open(path))
-            image_labels.append(label)
-        except Exception as e:
-            # Nếu không thể load ảnh, hiển thị tên file
-            label = tk.Label(image_container, text=os.path.basename(image_path)[:10] + "...", 
-                           width=12, height=3, relief="solid")
-            label.pack()
-            image_labels.append(label)
-    
-    if len(image_paths) > 6:
-        more_label = tk.Label(image_display_frame, text=f"... và {len(image_paths) - 6} ảnh khác", 
-                             font=("Arial", 9), fg="gray")
-        more_label.pack(side=tk.LEFT, padx=5, pady=5)
-
-def clear_folder_selection():
-    """Xóa lựa chọn folder hiện tại"""
-    global selected_image_folder, image_paths, image_labels, remove_buttons
-    selected_image_folder = ""
-    image_paths = []
-    
-    # Xóa hiển thị preview
-    for widget in image_display_frame.winfo_children():
-        widget.destroy()
-    image_labels = []
-    remove_buttons = []
-    
-    # Cập nhật hiển thị
-    update_folder_display()
-
-
-def browse_folder():
-    global folder_path
-    folder_path = filedialog.askdirectory(title="Chọn thư mục lưu")
-    if folder_path:
-        folder_path_entry.delete(0, tk.END)
-        folder_path_entry.insert(0, folder_path)
-        save_folder_path(folder_path)
-
-def save_folder_path(path):
-    with open(CONFIG_FILE, "w") as f:
-        f.write(path)
-
-def load_folder_path():
+def open_config_manager():
+    """Mở chương trình config manager"""
     try:
-        with open(CONFIG_FILE, "r") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return ""
+        # Kiểm tra xem file config_manager.py có tồn tại không
+        if os.path.exists("config_manager.py"):
+            # Mở config_manager.py bằng Python
+            subprocess.Popen([sys.executable, "config_manager.py"])
+            print("🔧 Đã mở Config Manager")
+        else:
+            messagebox.showerror("Lỗi", "Không tìm thấy file config_manager.py!")
+    except Exception as e:
+        messagebox.showerror("Lỗi", f"Không thể mở Config Manager: {e}")
+
+
 
 def create_folder():
-    global folder_path, image_paths, image_labels, remove_buttons
     tinh = combobox_tinh.get()
     daily = combobox_daily.get()
     so_tau = tau_num.get()
@@ -445,17 +498,17 @@ def create_folder():
         messagebox.showerror("Lỗi", "Mã niêm phong không hợp lệ!")
         return
 
-    # Lấy đường dẫn từ ô nhập liệu nếu nó đã được thay đổi
-    folder_path = folder_path_entry.get()
+    # Lấy đường dẫn output
+    output_path = output_folder_entry.get()
 
-    # Kiểm tra đường dẫn thư mục
-    if not folder_path:
-        messagebox.showerror("Lỗi", "Vui lòng chọn thư mục lưu!")
+    # Kiểm tra đường dẫn output
+    if not output_path:
+        messagebox.showerror("Lỗi", "Vui lòng chọn folder output!")
         return
 
     # Kiểm tra mã thiết bị
     if not ma_thiet_bi.isdigit() or len(ma_thiet_bi) != 6:
-        messagebox.showerror("Lỗi", "Mã thiết bị phải là 6 chữ số!")
+        messagebox.showerror("Lỗi", "Mã thiết bị phải là đúng 6 chữ số!")
         return
 
     # Rút gọn tên tỉnh và đại lý
@@ -470,19 +523,28 @@ def create_folder():
 
     # Tạo tên thư mục
     folder_name = f"{tinh_rut_gon}.{dai_ly_rut_gon}.{so_tau}.{ma_thiet_bi}.{ma_niem_phong}.{ngay}.{cong_no_suffix}"
-    full_path = os.path.join(folder_path, folder_name)
+    full_path = os.path.join(output_path, folder_name)
 
     try:
         os.makedirs(full_path)
         
-        # Copy ảnh từ folder đã chọn vào folder mới
-        if image_paths:
-            for image_path in image_paths:
-                image_name = os.path.basename(image_path)
-                destination_path = os.path.join(full_path, image_name)
-                shutil.copy2(image_path, destination_path)  # Sử dụng copy2 để giữ metadata
-
-        label_result.config(text="✅ Tạo folder thành công!")
+        # Move ảnh từ folder input sang folder output
+        input_path = input_folder_entry.get()
+        if input_path and os.path.exists(input_path):
+            moved_count = 0
+            for filename in os.listdir(input_path):
+                if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                    source_path = os.path.join(input_path, filename)
+                    destination_path = os.path.join(full_path, filename)
+                    shutil.move(source_path, destination_path)
+                    moved_count += 1
+            
+            if moved_count > 0:
+                label_result.config(text=f"✅ Tạo folder thành công và đã di chuyển {moved_count} ảnh!")
+            else:
+                label_result.config(text="✅ Tạo folder thành công! (Không có ảnh để di chuyển)")
+        else:
+            label_result.config(text="✅ Tạo folder thành công! (Không có folder input)")
         
         # Xóa mã niêm phong đã dùng trong file niêm_phong.txt
         valid_seal_codes.remove(ma_niem_phong)
@@ -492,9 +554,6 @@ def create_folder():
 
         # Cập nhật hiển thị số mã niêm phong còn lại
         update_remaining_seal_codes()
-        
-        # Xóa lựa chọn folder sau khi tạo thành công
-        clear_folder_selection()
         
     except Exception as e:
         label_result.config(text=f"❌ Lỗi: {e}")
@@ -569,12 +628,12 @@ danh_sach_dai_ly = list(dai_ly_vt.keys())
 
 
 # Frame chứa các thành phần nhập liệu
-input_frame = tk.LabelFrame(window, text="Thông tin")  # Khởi tạo input_frame
+input_frame = tk.LabelFrame(window, text="Thông tin")
 input_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
-# Frame chứa chức năng AI
-ai_frame = tk.LabelFrame(window, text="Phân tích AI")
-ai_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+# Frame chứa đường dẫn
+path_frame = tk.LabelFrame(window, text="Đường dẫn")
+path_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
 
 # Các Label và Entry trong Frame
 label_tinh = tk.Label(input_frame, text="Tỉnh:")
@@ -589,18 +648,60 @@ combobox_daily.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
 label_sotau = tk.Label(input_frame, text="Số tàu:")
 label_sotau.grid(row=2, column=0, padx=5, pady=5, sticky="w")
-tau_num = tk.Entry(input_frame)
+tau_num = tk.Entry(input_frame, width=10)
 tau_num.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+
+# Validation cho số tàu - chỉ cho phép số
+def validate_tau_number(event):
+    value = tau_num.get()
+    # Chỉ giữ lại các ký tự số
+    filtered_value = ''.join(filter(str.isdigit, value))
+    
+    if filtered_value != value:
+        tau_num.delete(0, tk.END)
+        tau_num.insert(0, filtered_value)
+
+tau_num.bind('<KeyRelease>', validate_tau_number)
 
 label_device_code = tk.Label(input_frame, text="Mã thiết bị:")
 label_device_code.grid(row=3, column=0, padx=5, pady=5, sticky="w")
-device_code_num = tk.Entry(input_frame)
+device_code_num = tk.Entry(input_frame, width=10)
 device_code_num.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
+
+# Validation cho mã thiết bị - chỉ cho phép số và tối đa 6 ký tự
+def validate_device_code(event):
+    value = device_code_num.get()
+    # Chỉ giữ lại các ký tự số
+    filtered_value = ''.join(filter(str.isdigit, value))
+    # Giới hạn tối đa 6 ký tự
+    if len(filtered_value) > 6:
+        filtered_value = filtered_value[:6]
+    
+    if filtered_value != value:
+        device_code_num.delete(0, tk.END)
+        device_code_num.insert(0, filtered_value)
+
+device_code_num.bind('<KeyRelease>', validate_device_code)
 
 label_seal_code = tk.Label(input_frame, text="Mã niêm phong:")
 label_seal_code.grid(row=4, column=0, padx=5, pady=5, sticky="w")
-seal_code_num = tk.Entry(input_frame)
+seal_code_num = tk.Entry(input_frame, width=10)
 seal_code_num.grid(row=4, column=1, padx=5, pady=5, sticky="ew")
+
+# Validation cho mã niêm phong - format: 1 chữ cái + 6 số
+def validate_seal_code(event):
+    value = seal_code_num.get().upper()
+    # Chỉ giữ lại chữ cái và số
+    filtered_value = ''.join(c for c in value if c.isalnum())
+    # Giới hạn tối đa 7 ký tự
+    if len(filtered_value) > 7:
+        filtered_value = filtered_value[:7]
+    
+    if filtered_value != value:
+        seal_code_num.delete(0, tk.END)
+        seal_code_num.insert(0, filtered_value)
+
+seal_code_num.bind('<KeyRelease>', validate_seal_code)
 
 label_days = tk.Label(input_frame, text="Ngày:")
 label_days.grid(row=5, column=0, padx=5, pady=5, sticky="w")
@@ -616,72 +717,102 @@ for i, option in enumerate(cong_no_options):
 
 
 
-# Frame chứa thông tin folder đã chọn
-folder_info_frame = tk.Frame(ai_frame)
-folder_info_frame.pack(fill=tk.X, padx=10, pady=5)
+# Folder Input
+label_input_folder = tk.Label(path_frame, text="Folder Input:")
+label_input_folder.grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
-# Nút "Chọn folder ảnh"
-button_chon_folder = tk.Button(image_frame, text="📁 Chọn folder ảnh", command=select_image_folder,
-                              bg="#2196F3", fg="white", font=("Arial", 10, "bold"))
-button_chon_folder.pack(pady=5)
+input_folder_frame = tk.Frame(path_frame)
+input_folder_frame.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
-# Nút "Xóa folder"
-button_xoa_folder = tk.Button(image_frame, text="🗑️ Xóa folder", command=clear_folder_selection,
-                             bg="#f44336", fg="white", font=("Arial", 9))
-button_xoa_folder.pack(pady=2)
+input_folder_entry = tk.Entry(input_folder_frame, width=40)
+input_folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-# Label hiển thị thông tin folder
-label_folder_info = tk.Label(image_frame, text="📁 Chưa chọn folder", 
-                            font=("Arial", 9), fg="gray")
-label_folder_info.pack(pady=2)
+# Tự động lưu khi thay đổi đường dẫn input
+def on_input_folder_change(event):
+    path = input_folder_entry.get().strip()
+    if path and os.path.isdir(path):
+        save_input_folder_path(path)
 
-# Nút "Phân tích AI"
-button_analyze = tk.Button(image_frame, text="🤖 Phân tích AI", command=analyze_images_with_ai, 
-                          bg="#4CAF50", fg="white", font=("Arial", 10, "bold"),
-                          state="normal" if AI_AVAILABLE else "disabled")
-button_analyze.pack(pady=5)
+input_folder_entry.bind('<FocusOut>', on_input_folder_change)
+
+button_browse_input = tk.Button(input_folder_frame, text="Chọn", command=browse_input_folder)
+button_browse_input.pack(side=tk.RIGHT, padx=(5, 0))
+
+# Folder Output
+label_output_folder = tk.Label(path_frame, text="Folder Output:")
+label_output_folder.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+
+output_folder_frame = tk.Frame(path_frame)
+output_folder_frame.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+output_folder_entry = tk.Entry(output_folder_frame, width=40)
+output_folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+# Tự động lưu khi thay đổi đường dẫn output
+def on_output_folder_change(event):
+    path = output_folder_entry.get().strip()
+    if path and os.path.isdir(path):
+        save_output_folder_path(path)
+
+output_folder_entry.bind('<FocusOut>', on_output_folder_change)
+
+button_browse_output = tk.Button(output_folder_frame, text="Chọn", command=browse_output_folder)
+button_browse_output.pack(side=tk.RIGHT, padx=(5, 0))
+
+# Cấu hình grid weights
+path_frame.columnconfigure(1, weight=1)
 
 # Frame chứa các nút điều khiển
-button_frame = tk.Frame(window)
-button_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="ew")  # Thay đổi columnspan
+button_frame = tk.Frame(path_frame)
+button_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
 
-# Nút "Lưu tại..." và ô nhập đường dẫn
-button_convert = tk.Button(button_frame, text="Lưu tại...", command=browse_folder)
-button_convert.pack(side="left", padx=5)
-folder_path_entry = tk.Entry(button_frame)
-folder_path_entry.pack(side="left", fill="x", expand=True, padx=5)
+# Nút "Xử lý AI"
+button_analyze = tk.Button(button_frame, text="🤖 Xử lý AI", command=analyze_images_with_ai, 
+                          bg="#4CAF50", fg="white", font=("Arial", 10, "bold"),
+                          state="normal" if AI_AVAILABLE else "disabled")
+button_analyze.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
 # Nút "Tạo folder"
 button_convert = tk.Button(button_frame, text="Tạo folder", command=create_folder)
-button_convert.pack(side="right", padx=5)
+button_convert.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+
+# Label hiển thị trạng thái AI
+ai_status_text = "✅ AI: Sẵn sàng" if AI_AVAILABLE else "❌ AI: Cần cấu hình API Key"
+label_ai_status = tk.Label(path_frame, text=ai_status_text, 
+                          fg="green" if AI_AVAILABLE else "red", font=("Arial", 9))
+label_ai_status.grid(row=3, column=0, columnspan=2, padx=5, pady=2)
+
+# Nút "Cấu hình" ở góc trong frame "Thông tin"
+button_config = tk.Button(input_frame, text="⚙️", command=open_config_manager,
+                         bg="#FF9800", fg="white", font=("Arial", 8),
+                         width=2, height=1, relief="flat", bd=0)
+button_config.place(in_=input_frame, relx=0.98, rely=0.02, anchor="ne")
 
 # Thêm label hiển thị số mã niêm phong còn lại
 label_remaining_seal_codes = tk.Label(input_frame, text="")
 label_remaining_seal_codes.grid(row=7, column=0, columnspan=2, padx=5, pady=5)  # Đặt vị trí phù hợp
 
-# Label hiển thị trạng thái AI
-ai_status_text = "🤖 AI: Sẵn sàng" if AI_AVAILABLE else "❌ AI: Không khả dụng"
-label_ai_status = tk.Label(input_frame, text=ai_status_text, 
-                          fg="green" if AI_AVAILABLE else "red", font=("Arial", 9))
-label_ai_status.grid(row=8, column=0, columnspan=2, padx=5, pady=5)
 
-# Thêm hướng dẫn sử dụng AI
-if AI_AVAILABLE:
-    help_text = "💡 Mẹo: Chọn folder ảnh và nhấn 'Phân tích AI' để tự động điền thông tin"
-    label_ai_help = tk.Label(input_frame, text=help_text, 
-                            fg="blue", font=("Arial", 8), wraplength=300)
-    label_ai_help.grid(row=9, column=0, columnspan=2, padx=5, pady=2)
 
 # Cập nhật ban đầu khi chương trình chạy
 update_remaining_seal_codes()
+
+# Load đường dẫn đã lưu
+input_folder_path = load_input_folder_path()
+if input_folder_path:
+    input_folder_entry.insert(0, input_folder_path)
+
+output_folder_path = load_output_folder_path()
+if output_folder_path:
+    output_folder_entry.insert(0, output_folder_path)
 
 # Label kết quả
 label_result = tk.Label(window, text="")
 label_result.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
 
-folder_path = load_folder_path()  # Tải đường dẫn đã lưu
-folder_path_entry.insert(0, folder_path)
-
-window.iconbitmap("iconZ.ico")
+# Cấu hình grid weights
+window.columnconfigure(0, weight=1)
+window.columnconfigure(1, weight=1)
+window.rowconfigure(0, weight=1)
 
 window.mainloop()
