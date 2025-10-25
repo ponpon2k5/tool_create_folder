@@ -12,11 +12,48 @@ from collections import Counter
 from PIL import Image
 import subprocess
 import sys
+import time
+import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 CONFIG_FILE = "folder_path_config.txt"
 INPUT_FOLDER_CONFIG = "input_folder_config.txt"
 OUTPUT_FOLDER_CONFIG = "output_folder_config.txt"
+
+# Cấu hình rate limit cho Gemini API
+GEMINI_RPM_LIMIT = 15  # Requests per minute
+BATCH_DELAY = 1.5  # Delay giữa các batch (giây) - tối ưu hóa để nhanh hơn
+CONCURRENT_REQUESTS = 3  # Số request đồng thời trong mỗi batch
+MIN_DELAY = 0.5  # Delay tối thiểu giữa các request trong batch
+IMAGES_PER_REQUEST = 5  # Số ảnh gửi trong một request (tối ưu để tránh rate limit)
+
+def calculate_batch_config(total_images):
+    """Tính toán cấu hình batch dựa trên tổng số ảnh với multi-image requests"""
+    # Tính số request cần thiết với multi-image
+    num_requests = math.ceil(total_images / IMAGES_PER_REQUEST)
+    
+    if num_requests <= GEMINI_RPM_LIMIT:
+        # Nếu số request <= 15, xử lý tất cả trong 1 batch
+        batch_size = num_requests
+        num_batches = 1
+        # Với multi-image: thời gian = số request / số concurrent * 1.5s (lâu hơn vì nhiều ảnh)
+        estimated_time = (num_requests / CONCURRENT_REQUESTS) * 1.5
+    else:
+        # Nếu nhiều hơn 15 requests, chia thành nhiều batch
+        batch_size = GEMINI_RPM_LIMIT
+        num_batches = math.ceil(num_requests / batch_size)
+        # Ước tính thời gian: (số batch - 1) * delay + (số request / concurrent) * 1.5s
+        estimated_time = (num_batches - 1) * BATCH_DELAY + (num_requests / CONCURRENT_REQUESTS) * 1.5
+    
+    return {
+        'batch_size': batch_size,
+        'num_batches': num_batches,
+        'estimated_time': estimated_time,
+        'concurrent_requests': CONCURRENT_REQUESTS,
+        'images_per_request': IMAGES_PER_REQUEST,
+        'total_requests': num_requests
+    }
 
 # Cấu hình Google Gemini AI
 def load_api_config():
@@ -120,24 +157,77 @@ def create_master_prompt():
     return f"""
 Phân tích hình ảnh này và trích xuất các thông tin sau đây.
 Trả lời bằng một đối tượng JSON hợp lệ duy nhất.
-Các key của JSON phải là: "ma_niem_phong", "ma_tau", "ngay_chup", "ma_thiet_bi".
+Các key của JSON phải là: "ma_niem_phong", "ma_tau_full", "ngay_chup", "ma_thiet_bi_full".
 
 - "ma_niem_phong": Tìm mã niêm phong, ví dụ "SEAL A 123456", "K 678901", hoặc "Z012345". Chỉ lấy phần gồm 1 ký tự chữ và 6 số, ví dụ "A123456", "K678901", hoặc "Z012345". Nếu không đúng định dạng, trả về "Không tìm thấy".
-- "ma_tau": Tìm mã tàu đầy đủ (có cả chữ cái và số), ví dụ "KG 95596", "BT 97793", "SG 12345", "BĐ 12345", "ĐNa 67890", "TTH 11111". Giữ nguyên format đầy đủ với khoảng trắng. Nếu không tìm thấy, trả về "Không tìm thấy".
+- "ma_tau_full": Tìm mã tàu đầy đủ (có cả chữ cái và số), ví dụ "KG 95596", "BT 97793", "SG 12345", "BĐ 12345", "ĐNa 67890", "TTH 11111". Giữ nguyên format đầy đủ với khoảng trắng. QUAN TRỌNG: Tổng hợp toàn bộ mã tàu bao gồm cả mã tỉnh và số tàu thành một chuỗi duy nhất. Nếu không tìm thấy, trả về "Không tìm thấy".
 - "ngay_chup": Tìm ngày tháng trên ảnh, ví dụ "05/08/2025". Chuyển thành định dạng 6 số "DDMMYY", ví dụ "050825". Nếu không đúng định dạng, trả về "Không tìm thấy".
-- "ma_thiet_bi": Tìm mã thiết bị, thường bắt đầu bằng BTK, ví dụ "BTK123456". Chỉ lấy 6 số cuối, ví dụ "123456". QUAN TRỌNG: Mã thiết bị phải là đúng 6 chữ số. Nếu không đúng định dạng hoặc không đủ 6 số, trả về "Không tìm thấy".
+- "ma_thiet_bi_full": Tìm mã thiết bị đầy đủ, BẮT BUỘC bắt đầu bằng BTK, ví dụ "BTK123456", "BTK009533", "BTK000123". Giữ nguyên format đầy đủ bao gồm cả chữ cái và số. QUAN TRỌNG: Tổng hợp toàn bộ mã thiết bị bao gồm cả phần chữ cái (BTK) và phần số thành một chuỗi duy nhất. CHỈ CHẤP NHẬN mã bắt đầu bằng BTK, không chấp nhận BOX, DEV, hoặc các mã khác. Nếu không tìm thấy mã BTK, trả về "Không tìm thấy".
 
 Ví dụ: 
-- Mã thiết bị: "BTK123456" → lấy "123456" (6 số)
-- Mã thiết bị: "BTK12345" → "Không tìm thấy" (chỉ có 5 số)
-- Mã thiết bị: "BTK1234567" → lấy "123456" (6 số đầu)
-- Mã tàu: "KG 95596" → trả về "KG 95596"
-- Mã tàu: "BĐ 12345" → trả về "BĐ 12345"
-- Mã tàu: "ĐNa 67890" → trả về "ĐNa 67890"
+- Mã thiết bị: "BTK123456" → trả về "BTK123456" (tổng hợp đầy đủ)
+- Mã thiết bị: "BTK009533" → trả về "BTK009533" (tổng hợp đầy đủ)
+- Mã thiết bị: "BTK000123" → trả về "BTK000123" (tổng hợp đầy đủ)
+- Mã thiết bị: "BOX001907" → trả về "Không tìm thấy" (không phải BTK)
+- Mã tàu: "KG 95596" → trả về "KG 95596" (tổng hợp đầy đủ)
+- Mã tàu: "BĐ 12345" → trả về "BĐ 12345" (tổng hợp đầy đủ)
+- Mã tàu: "ĐNa 67890" → trả về "ĐNa 67890" (tổng hợp đầy đủ)
+
+QUAN TRỌNG: 
+1. Tổng hợp mã tàu đầy đủ trước (bao gồm cả mã tỉnh và số tàu)
+2. Tổng hợp mã thiết bị đầy đủ trước (bao gồm cả BTK và số)
+3. Giữ nguyên format gốc của mã tàu và mã thiết bị
+4. Không tách riêng các phần trong JSON response
+5. Việc tách các phần sẽ được xử lý sau
 
 Nếu không xác định được, trả về "Không tìm thấy".
 
 Quan trọng: Chỉ trả về đối tượng JSON, không thêm bất kỳ văn bản giải thích nào khác.
+"""
+
+def create_multi_image_prompt():
+    """Tạo prompt cho xử lý nhiều ảnh trong một request"""
+    tinh_mapping = create_tinh_mapping()
+    
+    # Tạo danh sách mapping rõ ràng hơn
+    mapping_list = []
+    for code, name in tinh_mapping.items():
+        mapping_list.append(f"{code} = {name}")
+    
+    mapping_text = "\n".join(mapping_list)
+    
+    return f"""
+Phân tích các hình ảnh này và trích xuất thông tin từ mỗi ảnh.
+Trả lời bằng một mảng JSON hợp lệ, mỗi phần tử là kết quả của một ảnh.
+
+Mỗi phần tử trong mảng phải có các key: "ma_niem_phong", "ma_tau_full", "ngay_chup", "ma_thiet_bi_full".
+
+- "ma_niem_phong": Tìm mã niêm phong, ví dụ "SEAL A 123456", "K 678901", hoặc "Z012345". Chỉ lấy phần gồm 1 ký tự chữ và 6 số, ví dụ "A123456", "K678901", hoặc "Z012345". Nếu không đúng định dạng, trả về "Không tìm thấy".
+- "ma_tau_full": Tìm mã tàu đầy đủ (có cả chữ cái và số), ví dụ "KG 95596", "BT 97793", "SG 12345", "BĐ 12345", "ĐNa 67890", "TTH 11111". Giữ nguyên format đầy đủ với khoảng trắng. QUAN TRỌNG: Tổng hợp toàn bộ mã tàu bao gồm cả mã tỉnh và số tàu thành một chuỗi duy nhất. Nếu không tìm thấy, trả về "Không tìm thấy".
+- "ngay_chup": Tìm ngày tháng trên ảnh, ví dụ "05/08/2025". Chuyển thành định dạng 6 số "DDMMYY", ví dụ "050825". Nếu không đúng định dạng, trả về "Không tìm thấy".
+- "ma_thiet_bi_full": Tìm mã thiết bị đầy đủ, BẮT BUỘC bắt đầu bằng BTK, ví dụ "BTK123456", "BTK009533", "BTK000123". Giữ nguyên format đầy đủ bao gồm cả chữ cái và số. QUAN TRỌNG: Tổng hợp toàn bộ mã thiết bị bao gồm cả phần chữ cái (BTK) và phần số thành một chuỗi duy nhất. CHỈ CHẤP NHẬN mã bắt đầu bằng BTK, không chấp nhận BOX, DEV, hoặc các mã khác. Nếu không tìm thấy mã BTK, trả về "Không tìm thấy".
+
+Ví dụ: 
+- Mã thiết bị: "BTK123456" → trả về "BTK123456" (tổng hợp đầy đủ)
+- Mã thiết bị: "BTK009533" → trả về "BTK009533" (tổng hợp đầy đủ)
+- Mã thiết bị: "BTK000123" → trả về "BTK000123" (tổng hợp đầy đủ)
+- Mã thiết bị: "BOX001907" → trả về "Không tìm thấy" (không phải BTK)
+- Mã tàu: "KG 95596" → trả về "KG 95596" (tổng hợp đầy đủ)
+- Mã tàu: "BĐ 12345" → trả về "BĐ 12345" (tổng hợp đầy đủ)
+- Mã tàu: "ĐNa 67890" → trả về "ĐNa 67890" (tổng hợp đầy đủ)
+
+QUAN TRỌNG: 
+1. Phân tích từng ảnh riêng biệt
+2. Trả về mảng JSON với số phần tử bằng số ảnh
+3. Tổng hợp mã tàu đầy đủ trước (bao gồm cả mã tỉnh và số tàu)
+4. Tổng hợp mã thiết bị đầy đủ trước (bao gồm cả BTK và số)
+5. Giữ nguyên format gốc của mã tàu và mã thiết bị
+6. Không tách riêng các phần trong JSON response
+7. Việc tách các phần sẽ được xử lý sau
+
+Nếu không xác định được, trả về "Không tìm thấy".
+
+Quan trọng: Chỉ trả về mảng JSON, không thêm bất kỳ văn bản giải thích nào khác.
 """
 
 def process_image_with_ai(image_path):
@@ -156,6 +246,118 @@ def process_image_with_ai(image_path):
         return {"error": "AI không trả về JSON hợp lệ", "raw_response": response.text}
     except Exception as e:
         return {"error": f"Lỗi: {e}"}
+
+def process_multiple_images_with_ai(image_paths):
+    """Phân tích nhiều ảnh trong một request và trả về danh sách kết quả"""
+    try:
+        # Mở tất cả ảnh
+        images = []
+        for image_path in image_paths:
+            img = Image.open(image_path)
+            images.append(img)
+        
+        # Tạo prompt cho multi-image
+        current_prompt = create_multi_image_prompt()
+        
+        # Gửi tất cả ảnh trong một request
+        response = model.generate_content([current_prompt] + images)
+        cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
+        data = json.loads(cleaned_text)
+        
+        # Đảm bảo data là một mảng
+        if not isinstance(data, list):
+            data = [data]
+        
+        # Thêm thông tin file name cho mỗi kết quả
+        results = []
+        for i, result in enumerate(data):
+            if i < len(image_paths):
+                result['file_name'] = os.path.basename(image_paths[i])
+                result['raw_response'] = response.text
+                results.append(result)
+        
+        return results
+    except json.JSONDecodeError:
+        # Nếu không parse được JSON, tạo kết quả lỗi cho tất cả ảnh
+        error_results = []
+        for image_path in image_paths:
+            error_results.append({
+                "error": "AI không trả về JSON hợp lệ", 
+                "raw_response": response.text,
+                "file_name": os.path.basename(image_path)
+            })
+        return error_results
+    except Exception as e:
+        # Nếu có lỗi khác, tạo kết quả lỗi cho tất cả ảnh
+        error_results = []
+        for image_path in image_paths:
+            error_results.append({
+                "error": f"Lỗi: {e}",
+                "file_name": os.path.basename(image_path)
+            })
+        return error_results
+
+def process_batch_multi_image(batch_images, batch_num, total_batches, total_images):
+    """Xử lý một batch ảnh với multi-image requests"""
+    batch_results = []
+    request_times = []  # Lưu thời gian xử lý các request
+    
+    def process_image_group(image_group_info):
+        image_paths, start_idx = image_group_info
+        start_time = time.time()
+        
+        print(f"🔄 Đang xử lý nhóm ảnh {start_idx + 1}-{start_idx + len(image_paths)}/{total_images} ({len(image_paths)} ảnh)")
+        
+        # Cập nhật UI progress
+        def update_progress():
+            label_result.config(text=f"Đang phân tích nhóm ảnh {start_idx + 1}-{start_idx + len(image_paths)}/{total_images}...\nBatch {batch_num + 1}/{total_batches}")
+        window.after(0, update_progress)
+        
+        # Xử lý nhiều ảnh trong một request
+        results = process_multiple_images_with_ai(image_paths)
+        
+        end_time = time.time()
+        request_time = end_time - start_time
+        request_times.append(request_time)
+        
+        print(f"✅ Hoàn thành nhóm ảnh {start_idx + 1}-{start_idx + len(image_paths)}/{total_images} (took {request_time:.2f}s)")
+        return results
+    
+    # Chia ảnh thành các nhóm
+    image_groups = []
+    start_idx = batch_num * GEMINI_RPM_LIMIT
+    for i in range(0, len(batch_images), IMAGES_PER_REQUEST):
+        group_images = batch_images[i:i + IMAGES_PER_REQUEST]
+        group_start_idx = start_idx + i
+        image_groups.append((group_images, group_start_idx))
+    
+    print(f"📦 Chia batch thành {len(image_groups)} nhóm, mỗi nhóm tối đa {IMAGES_PER_REQUEST} ảnh")
+    
+    # Xử lý concurrent với ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=CONCURRENT_REQUESTS) as executor:
+        # Submit tất cả tasks
+        future_to_group = {executor.submit(process_image_group, group_info): group_info 
+                          for group_info in image_groups}
+        
+        # Thu thập kết quả khi hoàn thành
+        for future in as_completed(future_to_group):
+            try:
+                results = future.result()
+                batch_results.extend(results)  # Extend vì results là một list
+            except Exception as e:
+                group_info = future_to_group[future]
+                # Tạo kết quả lỗi cho tất cả ảnh trong nhóm
+                for image_path in group_info[0]:
+                    error_result = {"error": f"Lỗi xử lý nhóm ảnh: {e}", "file_name": os.path.basename(image_path)}
+                    batch_results.append(error_result)
+    
+    # Tính toán thống kê thời gian
+    if request_times:
+        avg_time = sum(request_times) / len(request_times)
+        total_images_processed = len(batch_results)
+        print(f"📊 Thống kê batch {batch_num + 1}: {len(request_times)} requests, trung bình {avg_time:.2f}s/request, {total_images_processed} ảnh")
+    
+    return batch_results
 
 def analyze_images_with_ai():
     """Phân tích tất cả ảnh trong folder input bằng AI"""
@@ -181,25 +383,57 @@ def analyze_images_with_ai():
         messagebox.showwarning("Cảnh báo", "Không tìm thấy ảnh nào trong folder input.")
         return
     
-    # Hiển thị loading
-    label_result.config(text=f"Đang phân tích {len(image_paths)} ảnh bằng AI...")
+    # Tính toán cấu hình batch
+    batch_config = calculate_batch_config(len(image_paths))
+    
+    # Hiển thị loading với thông tin batch
+    if batch_config['num_batches'] > 1:
+        label_result.config(text=f"Đang phân tích {len(image_paths)} ảnh bằng AI...\nChia thành {batch_config['num_batches']} batch, {batch_config['concurrent_requests']} concurrent\n{batch_config['images_per_request']} ảnh/request (ước tính {batch_config['estimated_time']:.1f}s)")
+    else:
+        label_result.config(text=f"Đang phân tích {len(image_paths)} ảnh bằng AI...\n{batch_config['concurrent_requests']} concurrent, {batch_config['images_per_request']} ảnh/request")
     button_analyze.config(state="disabled")
     window.update()
     
     # Thông báo bắt đầu phân tích
     print(f"\n🚀 BẮT ĐẦU PHÂN TÍCH {len(image_paths)} ẢNH BẰNG AI...")
     print(f"📁 Folder: {input_path}")
+    print(f"📊 Cấu hình batch: {batch_config['num_batches']} batch, mỗi batch tối đa {batch_config['batch_size']} requests")
+    print(f"🖼️  Multi-image processing: {batch_config['images_per_request']} ảnh/request")
+    print(f"⚡ Concurrent processing: {batch_config['concurrent_requests']} requests đồng thời")
+    print(f"📈 Tổng số requests: {batch_config['total_requests']} (giảm {len(image_paths) - batch_config['total_requests']} requests)")
+    print(f"⏱️  Thời gian ước tính: {batch_config['estimated_time']:.1f} giây")
     print("-" * 60)
     
     def analyze_thread():
         try:
             all_results = []
-            for i, image_path in enumerate(image_paths, 1):
-                print(f"🔄 Đang xử lý ảnh {i}/{len(image_paths)}: {os.path.basename(image_path)}")
-                result = process_image_with_ai(image_path)
-                result['file_name'] = os.path.basename(image_path)
-                all_results.append(result)
-                print(f"✅ Hoàn thành ảnh {i}/{len(image_paths)}")
+            batch_size = batch_config['batch_size']
+            num_batches = batch_config['num_batches']
+            
+            for batch_num in range(num_batches):
+                start_idx = batch_num * batch_size
+                end_idx = min(start_idx + batch_size, len(image_paths))
+                batch_images = image_paths[start_idx:end_idx]
+                
+                print(f"\n📦 BATCH {batch_num + 1}/{num_batches}: Xử lý ảnh {start_idx + 1}-{end_idx}")
+                print(f"🖼️  Số ảnh trong batch: {len(batch_images)}")
+                print(f"⚡ Multi-image processing: {IMAGES_PER_REQUEST} ảnh/request")
+                print(f"🔄 Concurrent processing: {CONCURRENT_REQUESTS} requests đồng thời")
+                
+                # Xử lý batch với multi-image processing
+                batch_results = process_batch_multi_image(batch_images, batch_num, num_batches, len(image_paths))
+                all_results.extend(batch_results)
+                
+                print(f"✅ Hoàn thành batch {batch_num + 1}/{num_batches}")
+                
+                # Delay giữa các batch (trừ batch cuối)
+                if batch_num < num_batches - 1:
+                    print(f"⏳ Chờ {BATCH_DELAY}s trước khi xử lý batch tiếp theo...")
+                    # Cập nhật UI với thông báo delay
+                    def update_delay():
+                        label_result.config(text=f"Hoàn thành batch {batch_num + 1}/{num_batches}\nChờ {BATCH_DELAY}s trước batch tiếp theo...")
+                    window.after(0, update_delay)
+                    time.sleep(BATCH_DELAY)
             
             print(f"\n🎉 HOÀN TẤT PHÂN TÍCH {len(image_paths)} ẢNH!")
             print("-" * 60)
@@ -218,9 +452,9 @@ def analyze_images_with_ai():
                     continue
                 
                 ma_niem_phong = result.get('ma_niem_phong', '').strip()
-                ma_tau_full = result.get('ma_tau', '').strip()  # Mã tàu đầy đủ
+                ma_tau_full = result.get('ma_tau_full', '').strip()  # Mã tàu đầy đủ từ AI
                 ngay_chup = result.get('ngay_chup', '').strip()
-                ma_thiet_bi = result.get('ma_thiet_bi', '').strip()
+                ma_thiet_bi_full = result.get('ma_thiet_bi_full', '').strip()  # Mã thiết bị đầy đủ từ AI
                 
                 # Tự động suy ra tỉnh từ mã tàu đầy đủ
                 tinh = "Không tìm thấy"
@@ -229,29 +463,34 @@ def analyze_images_with_ai():
                 if ma_tau_full and ma_tau_full.lower() != 'không tìm thấy':
                     # Tách mã tàu đầy đủ thành chữ cái và số
                     import re
-                    ma_tau_pattern = r'([A-Z]{2,3})[-\s]*(\d{5})'
+                    ma_tau_pattern = r'([A-Za-z]{2,3})[-\s]*(\d{5})'
                     ma_tau_match = re.search(ma_tau_pattern, ma_tau_full)
                     
                     if ma_tau_match:
-                        tinh_code = ma_tau_match.group(1)  # Chữ cái tỉnh
+                        tinh_code = ma_tau_match.group(1).upper()  # Chữ cái tỉnh, chuyển thành uppercase
                         ma_tau_so = ma_tau_match.group(2)  # Số tàu
                         
-                        # Tìm tỉnh từ mapping
+                        # Tìm tỉnh từ mapping (so sánh không phân biệt hoa thường)
                         tinh_mapping = create_tinh_mapping()
                         for code, name in tinh_mapping.items():
-                            if code == tinh_code:
+                            if code.upper() == tinh_code:
                                 tinh = name
                                 break
                         
                         # Lưu thông tin vào result để debug
                         result['tinh_code'] = tinh_code
+                        result['tinh_code_original'] = ma_tau_match.group(1)  # Lưu mã gốc để debug
                         result['ma_tau_so'] = ma_tau_so
                         result['tinh'] = tinh
+                        result['ma_tau'] = ma_tau_full  # Lưu mã tàu đầy đủ để tương thích
                     else:
                         # Nếu không match pattern, giữ nguyên
                         ma_tau_so = ma_tau_full
                         result['ma_tau_so'] = ma_tau_so
                         result['tinh'] = tinh
+                
+                # Lưu mã thiết bị đầy đủ để xử lý sau
+                result['ma_thiet_bi_full'] = ma_thiet_bi_full
                 
                 if ma_niem_phong and ma_niem_phong.lower() != 'không tìm thấy':
                     niem_phong_counts[ma_niem_phong] += 1
@@ -259,8 +498,8 @@ def analyze_images_with_ai():
                     tau_counts[ma_tau_so] += 1
                 if ngay_chup and ngay_chup.lower() != 'không tìm thấy':
                     ngay_chup_counts[ngay_chup] += 1
-                if ma_thiet_bi and ma_thiet_bi.lower() != 'không tìm thấy':
-                    ma_thiet_bi_counts[ma_thiet_bi] += 1
+                if ma_thiet_bi_full and ma_thiet_bi_full.lower() != 'không tìm thấy':
+                    ma_thiet_bi_counts[ma_thiet_bi_full] += 1
                 if tinh and tinh.lower() != 'không tìm thấy':
                     tinh_counts[tinh] += 1
             
@@ -268,8 +507,34 @@ def analyze_images_with_ai():
             final_niem_phong = niem_phong_counts.most_common(1)[0][0] if niem_phong_counts else ""
             final_tau = tau_counts.most_common(1)[0][0] if tau_counts else ""
             final_ngay_chup = ngay_chup_counts.most_common(1)[0][0] if ngay_chup_counts else ""
-            final_thiet_bi = ma_thiet_bi_counts.most_common(1)[0][0] if ma_thiet_bi_counts else ""
+            final_thiet_bi_full = ma_thiet_bi_counts.most_common(1)[0][0] if ma_thiet_bi_counts else ""
             final_tinh = tinh_counts.most_common(1)[0][0] if tinh_counts else ""
+            
+            # Xử lý mã thiết bị đầy đủ để lấy số cuối cùng
+            final_thiet_bi = "Không tìm thấy"
+            if final_thiet_bi_full and final_thiet_bi_full.lower() != 'không tìm thấy':
+                # Tách số từ mã thiết bị đầy đủ (chỉ chấp nhận BTK + số)
+                import re
+                thiet_bi_pattern = r'BTK(\d{6})'
+                thiet_bi_match = re.search(thiet_bi_pattern, final_thiet_bi_full.upper())
+                
+                if thiet_bi_match:
+                    final_thiet_bi = thiet_bi_match.group(1)  # Lấy 6 số
+                else:
+                    # Nếu không match pattern BTK, kiểm tra xem có phải mã khác không
+                    if not final_thiet_bi_full.upper().startswith('BTK'):
+                        print(f"⚠️  Mã thiết bị '{final_thiet_bi_full}' không bắt đầu bằng BTK - bỏ qua")
+                        final_thiet_bi = "Không tìm thấy"
+                    else:
+                        # Nếu bắt đầu bằng BTK nhưng không đúng format, thử lấy số
+                        numbers = re.findall(r'\d+', final_thiet_bi_full)
+                        if numbers:
+                            # Lấy số cuối cùng và đảm bảo có 6 chữ số
+                            last_number = numbers[-1]
+                            if len(last_number) >= 6:
+                                final_thiet_bi = last_number[-6:]  # Lấy 6 số cuối
+                            else:
+                                final_thiet_bi = last_number.zfill(6)  # Thêm số 0 ở đầu
             
             # Export chi tiết kết quả từng ảnh ra console
             export_detailed_results_to_console(all_results)
@@ -277,7 +542,7 @@ def analyze_images_with_ai():
             # Cập nhật giao diện
             window.after(0, lambda: update_ui_with_ai_results(
                 final_niem_phong, final_tau, final_ngay_chup, final_thiet_bi, final_tinh,
-                len(all_results), error_count
+                len(all_results), error_count, final_thiet_bi_full
             ))
             
         except Exception as e:
@@ -286,16 +551,16 @@ def analyze_images_with_ai():
     # Chạy phân tích trong thread riêng
     threading.Thread(target=analyze_thread, daemon=True).start()
 
-def update_ui_with_ai_results(ma_niem_phong, ma_tau, ngay_chup, ma_thiet_bi, tinh, total_images, error_count):
+def update_ui_with_ai_results(ma_niem_phong, ma_tau_so, ngay_chup, ma_thiet_bi, tinh, total_images, error_count, ma_thiet_bi_full=""):
     """Cập nhật giao diện với kết quả AI"""
     # Tự động điền thông tin
     if ma_niem_phong:
         seal_code_num.delete(0, tk.END)
         seal_code_num.insert(0, ma_niem_phong)
     
-    if ma_tau:
+    if ma_tau_so:
         tau_num.delete(0, tk.END)
-        tau_num.insert(0, ma_tau)
+        tau_num.insert(0, ma_tau_so)
     
     if ma_thiet_bi:
         device_code_num.delete(0, tk.END)
@@ -348,7 +613,7 @@ def update_ui_with_ai_results(ma_niem_phong, ma_tau, ngay_chup, ma_thiet_bi, tin
     label_result.config(text=result_text)
     
     # Export kết quả ra console
-    export_results_to_console(ma_niem_phong, ma_tau, ngay_chup, ma_thiet_bi, tinh, total_images, error_count)
+    export_results_to_console(ma_niem_phong, ma_tau_so, ngay_chup, ma_thiet_bi, tinh, total_images, error_count, ma_thiet_bi_full)
     
     # Bật lại nút
     button_analyze.config(state="normal")
@@ -373,6 +638,16 @@ def export_detailed_results_to_console(all_results):
             print(f"  📅 Ngày chụp: {result.get('ngay_chup', 'Không tìm thấy')}")
             print(f"  🔧 Mã thiết bị: {result.get('ma_thiet_bi', 'Không tìm thấy')}")
             
+            # Hiển thị thông tin chi tiết về mã thiết bị
+            ma_thiet_bi_full = result.get('ma_thiet_bi_full', '')
+            if ma_thiet_bi_full and ma_thiet_bi_full != 'Không tìm thấy':
+                print(f"     🔧 Mã thiết bị đầy đủ từ AI: '{ma_thiet_bi_full}'")
+                if ma_thiet_bi_full.upper().startswith('BTK'):
+                    print(f"     ✅ Mã thiết bị hợp lệ (bắt đầu bằng BTK)")
+                else:
+                    print(f"     ❌ Mã thiết bị không hợp lệ (không bắt đầu bằng BTK)")
+                print(f"     📝 Mã thiết bị sẽ được xử lý tách số ở cuối cùng")
+            
             # Chi tiết về việc suy ra tỉnh
             tinh = result.get('tinh', 'Không tìm thấy')
             print(f"  📍 Tỉnh: {tinh}")
@@ -384,15 +659,17 @@ def export_detailed_results_to_console(all_results):
                 print(f"        {raw_response[:200]}...")
                 
                 # Lấy thông tin đã được xử lý
-                ma_tau_full = result.get('ma_tau', '')
+                ma_tau_full = result.get('ma_tau_full', '')
                 tinh_code = result.get('tinh_code', '')
+                tinh_code_original = result.get('tinh_code_original', '')
                 ma_tau_so = result.get('ma_tau_so', '')
                 
                 print(f"     🚢 Mã tàu đầy đủ từ AI: '{ma_tau_full}'")
                 
                 if tinh_code and ma_tau_so:
                     print(f"     🔍 Phân tích mã tàu '{ma_tau_full}':")
-                    print(f"        📍 Chữ cái tỉnh: '{tinh_code}'")
+                    print(f"        📍 Chữ cái tỉnh (gốc): '{tinh_code_original}'")
+                    print(f"        📍 Chữ cái tỉnh (uppercase): '{tinh_code}'")
                     print(f"        🔢 Số tàu: '{ma_tau_so}'")
                     print(f"        🗺️  Suy ra tỉnh: '{tinh}'")
                     
@@ -402,6 +679,12 @@ def export_detailed_results_to_console(all_results):
                         print(f"        🎯 Chương trình đã dùng chữ cái '{tinh_code}' để suy ra tỉnh '{tinh}'")
                     else:
                         print(f"        ❌ Không tìm thấy mapping cho mã: {tinh_code}")
+                        print(f"        🔍 Danh sách mã tỉnh có sẵn:")
+                        tinh_mapping = create_tinh_mapping()
+                        for code, name in list(tinh_mapping.items())[:5]:  # Hiển thị 5 mã đầu
+                            print(f"           {code} → {name}")
+                        if len(tinh_mapping) > 5:
+                            print(f"           ... và {len(tinh_mapping) - 5} mã khác")
                 else:
                     print(f"     ⚠️  Mã tàu '{ma_tau_full}' không đúng format (cần: XX 12345)")
                     print(f"     🤔 Không thể suy ra tỉnh từ mã tàu này")
@@ -410,7 +693,7 @@ def export_detailed_results_to_console(all_results):
     
     print("\n" + "="*80)
 
-def export_results_to_console(ma_niem_phong, ma_tau, ngay_chup, ma_thiet_bi, tinh, total_images, error_count):
+def export_results_to_console(ma_niem_phong, ma_tau_so, ngay_chup, ma_thiet_bi, tinh, total_images, error_count, ma_thiet_bi_full=""):
     """Export kết quả tổng hợp ra console"""
     print("\n" + "="*60)
     print("🤖 KẾT QUẢ TỔNG HỢP AI")
@@ -422,10 +705,18 @@ def export_results_to_console(ma_niem_phong, ma_tau, ngay_chup, ma_thiet_bi, tin
     print("-"*60)
     print("📋 THÔNG TIN ĐƯỢC TRÍCH XUẤT (Tần suất cao nhất):")
     print(f"  🔒 Mã niêm phong: {ma_niem_phong if ma_niem_phong else 'Không tìm thấy'}")
-    print(f"  🚢 Số tàu: {ma_tau if ma_tau else 'Không tìm thấy'}")
+    print(f"  🚢 Số tàu: {ma_tau_so if ma_tau_so else 'Không tìm thấy'}")
     print(f"  📅 Ngày chụp: {ngay_chup if ngay_chup else 'Không tìm thấy'}")
     print(f"  🔧 Mã thiết bị: {ma_thiet_bi if ma_thiet_bi else 'Không tìm thấy'}")
     print(f"  📍 Tỉnh: {tinh if tinh else 'Không tìm thấy'}")
+    
+    # Hiển thị thông tin chi tiết về mã thiết bị
+    if ma_thiet_bi_full and ma_thiet_bi_full != 'Không tìm thấy':
+        print("-"*60)
+        print("🔧 THÔNG TIN MÃ THIẾT BỊ:")
+        print(f"  📱 Mã thiết bị đầy đủ: {ma_thiet_bi_full}")
+        print(f"  🔢 Số thiết bị (đã tách): {ma_thiet_bi}")
+        print(f"  ✅ Xử lý: {ma_thiet_bi_full} → {ma_thiet_bi}")
     
     # Thêm thông tin về mapping tỉnh
     if tinh and tinh != "Không tìm thấy":
@@ -471,13 +762,17 @@ def show_ai_error(error_msg):
 def open_config_manager():
     """Mở chương trình config manager"""
     try:
-        # Kiểm tra xem file config_manager.py có tồn tại không
-        if os.path.exists("config_manager.py"):
-            # Mở config_manager.py bằng Python
-            subprocess.Popen([sys.executable, "config_manager.py"])
+        # Kiểm tra xem file config_manager.exe có tồn tại không
+        if os.path.exists("config_manager.exe"):
+            # Mở config_manager.exe
+            subprocess.Popen(["config_manager.exe"])
             print("🔧 Đã mở Config Manager")
+        elif os.path.exists("config_manager.py"):
+            # Fallback: mở config_manager.py bằng Python
+            subprocess.Popen([sys.executable, "config_manager.py"])
+            print("🔧 Đã mở Config Manager (Python)")
         else:
-            messagebox.showerror("Lỗi", "Không tìm thấy file config_manager.py!")
+            messagebox.showerror("Lỗi", "Không tìm thấy file config_manager.exe hoặc config_manager.py!")
     except Exception as e:
         messagebox.showerror("Lỗi", f"Không thể mở Config Manager: {e}")
 
