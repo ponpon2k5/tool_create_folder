@@ -1,0 +1,135 @@
+========================================
+    TOOL TẠO FOLDER v1.3
+    HƯỚNG DẪN SỬ DỤNG
+========================================
+
+🚀 CÁCH SỬ DỤNG:
+
+1. CHẠY CHƯƠNG TRÌNH:
+   - Double-click vào file "create_folder.exe"
+   - Chương trình sẽ mở giao diện chính
+
+2. CẤU HÌNH LẦN ĐẦU (QUAN TRỌNG):
+   - Nhấn nút "⚙️" ở góc trên bên phải
+   - Chương trình sẽ mở "config_manager.exe"
+   - Vào tab "API Gemini"
+   - Nhập API Key của Google Gemini
+   - Nhấn "Lưu"
+
+   💡 Lấy API Key miễn phí tại:
+   https://makersuite.google.com/app/apikey
+
+3. SỬ DỤNG TOOL:
+   - Chọn "Folder Input" (chứa ảnh cần phân tích)
+   - Chọn "Folder Output" (nơi lưu kết quả)
+   - Nhấn "🤖 Xử lý AI" để phân tích ảnh
+   - Theo dõi tiến trình qua thanh progress bar
+   - Kiểm tra thông tin đã điền tự động
+   - Nhấn "Tạo folder" để tạo folder mới
+
+4. TÍNH NĂNG MỚI v1.3:
+   ✅ Thanh progress bar hiển thị tiến trình xử lý
+   ✅ Hiển thị thời gian xử lý sau khi hoàn thành
+   ✅ Tự động tạo PDF từ tất cả ảnh để kiểm tra
+   ✅ Tự động mở PDF sau khi tạo
+   ✅ PDF được lưu trong folder input (tên: IMG_Combine_YYYYMMDD_HHMMSS.pdf)
+
+5. KẾT QUẢ:
+   - Folder mới được tạo với tên theo format:
+   Tỉnh.Đại_lý.Số_tàu.Mã_thiết_bị.Mã_niêm_phong.Ngày.Công_nợ
+   - Ví dụ: KG.ABC.95596.123456.A123456.270125.1
+   - File PDF được tạo trong folder input để kiểm tra
+
+========================================
+    QUẢN LÝ CẤU HÌNH
+========================================
+
+🔧 CONFIG MANAGER:
+   - Chạy "config_manager.exe" để quản lý cấu hình
+   - Hoặc nhấn nút "⚙️" trong create_folder.exe
+
+📋 CÁC TAB QUẢN LÝ:
+   - Mã Niêm Phong: Thêm/sửa/xóa mã niêm phong
+   - API Gemini: Cấu hình API Key và Model
+   - Đại Lý: Quản lý danh sách đại lý
+   - Tỉnh Thành: Quản lý danh sách tỉnh thành
+
+========================================
+    XỬ LÝ SỰ CỐ
+========================================
+
+❌ Lỗi "AI không khả dụng":
+   → Chưa cấu hình API Key
+   → Nhấn nút "⚙️" để cấu hình
+
+❌ Lỗi "Mã niêm phong không hợp lệ":
+   → Cần thêm mã niêm phong mới
+   → Chạy "config_manager.exe" → tab "Mã Niêm Phong"
+
+❌ Lỗi "Không tìm thấy ảnh":
+   → Kiểm tra folder input có ảnh không
+   → Định dạng ảnh: .png, .jpg, .jpeg, .gif, .bmp, .webp
+
+❌ Tool chạy chậm:
+   → Kiểm tra kết nối internet
+   → Giảm số lượng ảnh trong folder input
+   → Kiểm tra API Key có đủ quota không
+
+❌ Nút "Cấu hình" không hoạt động:
+   → Đảm bảo "config_manager.exe" cùng thư mục với "create_folder.exe"
+   → Chạy trực tiếp "config_manager.exe"
+
+❌ PDF không tự động mở:
+   → Kiểm tra có phần mềm đọc PDF (Adobe Reader, Edge, Chrome)
+   → Mở thủ công file PDF trong folder input (tên: IMG_Combine_*.pdf)
+
+========================================
+    YÊU CẦU HỆ THỐNG
+========================================
+
+✅ Windows 7/8/10/11
+✅ Kết nối internet ổn định
+✅ Quyền đọc/ghi file
+✅ RAM tối thiểu 4GB (khuyến nghị 8GB)
+✅ Ổ cứng trống 1GB
+✅ Phần mềm đọc PDF (tùy chọn, để tự động mở PDF)
+
+========================================
+    TÍNH NĂNG CHI TIẾT
+========================================
+
+📊 THANH PROGRESS BAR:
+   - Hiển thị số ảnh đã xử lý / tổng số ảnh
+   - Cập nhật theo thời gian thực
+   - Tự động ẩn khi hoàn thành
+
+⏱️  THỜI GIAN XỬ LÝ:
+   - Hiển thị thời gian xử lý sau khi hoàn thành
+   - Format: "X phút Y giây" hoặc "X.Y giây"
+   - Giúp đánh giá hiệu suất
+
+📄 TẠO PDF TỰ ĐỘNG:
+   - Tự động gộp tất cả ảnh thành 1 file PDF
+   - Tên file: IMG_Combine_YYYYMMDD_HHMMSS.pdf
+   - Lưu trong folder input
+   - Tự động mở để kiểm tra thông tin AI
+   - PDF sẽ được di chuyển vào folder output khi tạo folder
+
+========================================
+    HỖ TRỢ
+========================================
+
+📧 Email: [Email hỗ trợ]
+📱 Hotline: [Số điện thoại]
+🌐 Website: [Website công ty]
+
+========================================
+    PHIÊN BẢN v1.3
+    Ngày build: 07/11/2025
+    - Thêm thanh progress bar hiển thị tiến trình
+    - Thêm hiển thị thời gian xử lý
+    - Tự động tạo và mở PDF từ tất cả ảnh
+    - Tối ưu hiệu suất và kích thước file
+    - Cải thiện trải nghiệm người dùng
+========================================
+

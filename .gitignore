@@ -1,0 +1,10 @@
+Tool_Tao_Folder_v1.0/
+Tool_Tao_Folder_v1.1/
+Tool_Tao_Folder_v1.2/
+Tool_Tao_Folder_v1.3/
+*.zip
+*.exe
+dist/
+build/
+__pycache__/
+.venv/
